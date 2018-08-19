@@ -184,7 +184,7 @@ namespace FaceLivingDetector {
 						g_ok_cnt++;
 						if (g_ok_cnt > 3) check_successful = true;
 						if (ret == EyesState::eyes_open) g_except_state = EyesState::eyes_colse;
-						else if (EyesState::eyes_colse) g_except_state = EyesState::eyes_open;
+						else if (ret == EyesState::eyes_colse) g_except_state = EyesState::eyes_open;
 					}
 					break;
 			}
