@@ -1,8 +1,10 @@
 #pragma once
 #include <string>
 #include <opencv2/opencv.hpp>
+#include <dlib/dnn.h>
 namespace FaceLivingDetector {
 
+	
 	enum Action {		
 		shake, 
 		open_mouth,
@@ -14,7 +16,7 @@ namespace FaceLivingDetector {
 		model_path: 模型地址
 		返回值:		0表示成功，-1表示失败
 	*/
-	int init(const std::string& model_path);
+	int initDetector(const std::string& detector_model_path, const std::string& resnet_model_path);
 
 	/*
 		开始监测
@@ -24,6 +26,12 @@ namespace FaceLivingDetector {
 		begin:		是否是第一帧
 		返回值:		-1表示监测失败，0表示正在检测，1表示检测成功，
 	*/
-	int execute(cv::Mat& frame, Action action, double timeout, bool begin);
+	int aliveDetect(cv::Mat& frame, Action action, double timeout, bool begin);
+
+	cv::Rect findFaceRect(const cv::Mat& frame);
+
+	double faceCompare(const cv::Mat& face1, const cv::Mat& face);
+
+
 };
 

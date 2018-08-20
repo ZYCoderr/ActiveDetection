@@ -1,14 +1,44 @@
 #include "stdafx.h"
 #include "FaceLivingDetector.h"
 #include <dlib/image_processing/frontal_face_detector.h>
-#include <dlib/image_processing/render_face_detections.h>
-#include <dlib/image_processing.h>
 #include <dlib/image_io.h>
 #include <dlib/opencv.h>
+#include <dlib/dnn.h>
+#include <dlib/clustering.h>
 #include <time.h>
 
 namespace FaceLivingDetector {
 	
+	using namespace dlib;
+
+	template <template <int, template<typename>class, int, typename> class block, int N, template<typename>class BN, typename SUBNET>
+	using residual = add_prev1<block<N, BN, 1, tag1<SUBNET>>>;
+
+	template <template <int, template<typename>class, int, typename> class block, int N, template<typename>class BN, typename SUBNET>
+	using residual_down = add_prev2<avg_pool<2, 2, 2, 2, skip1<tag2<block<N, BN, 2, tag1<SUBNET>>>>>>;
+
+	template <int N, template <typename> class BN, int stride, typename SUBNET>
+	using block = BN<con<N, 3, 3, 1, 1, relu<BN<con<N, 3, 3, stride, stride, SUBNET>>>>>;
+
+	template <int N, typename SUBNET> using ares = relu<residual<block, N, affine, SUBNET>>;
+	template <int N, typename SUBNET> using ares_down = relu<residual_down<block, N, affine, SUBNET>>;
+
+	template <typename SUBNET> using alevel0 = ares_down<256, SUBNET>;
+	template <typename SUBNET> using alevel1 = ares<256, ares<256, ares_down<256, SUBNET>>>;
+	template <typename SUBNET> using alevel2 = ares<128, ares<128, ares_down<128, SUBNET>>>;
+	template <typename SUBNET> using alevel3 = ares<64, ares<64, ares<64, ares_down<64, SUBNET>>>>;
+	template <typename SUBNET> using alevel4 = ares<32, ares<32, ares<32, SUBNET>>>;
+
+	using anet_type = loss_metric<fc_no_bias<128, dlib::avg_pool_everything<
+		alevel0<
+		alevel1<
+		alevel2<
+		alevel3<
+		alevel4<
+		max_pool<3, 3, 2, 2, relu<affine<con<32, 7, 7, 2, 2,
+		input_rgb_image_sized<150>
+		>>>>>>>>>>>>;
+
 	enum HeadState {
 		normal = 1,
 		turn_left = 2,
@@ -16,20 +46,21 @@ namespace FaceLivingDetector {
 	};
 
 	enum MouseState {
-		mouse_colse = 1,
+		mouse_close = 1,
 		mouse_open = 2
 	};
 
 	enum EyesState {
 		eyes_open = 1,
-		eyes_colse = 2
+		eyes_close = 2
 	};
 
-	dlib::frontal_face_detector detector;
-	dlib::shape_predictor predictor;
+	dlib::frontal_face_detector g_detector; // 人脸探测器
+	dlib::shape_predictor g_predictor; // 特征点计算器
+	anet_type g_net; // 用于计算脸部特征向量的神经网络
 
 	bool g_is_inited = false;
-	bool check_successful = false;
+	bool g_check_successful = false;
 
 	clock_t g_time_start, g_time_cur;
 
@@ -38,13 +69,14 @@ namespace FaceLivingDetector {
 	
 	const double eyes_ar_thresh = 0.43; // 如果AR大于它，则认为眼睛是睁开的。如果AR值小于它，则认为眼睛是闭上的。 
 
-	int init(const std::string& model_path)
+	int initDetector(const std::string& detector_model_path, const std::string& resnet_model_path)
 	{
 		if (g_is_inited) return 0;
-		if (model_path.empty()) return -1;
+		if (detector_model_path.empty() || resnet_model_path.empty()) return -1;
 		
-		detector = dlib::get_frontal_face_detector();
-		dlib::deserialize(model_path.c_str()) >> predictor;
+		g_detector = dlib::get_frontal_face_detector();
+		dlib::deserialize(detector_model_path.c_str()) >> g_predictor;
+		dlib::deserialize(resnet_model_path.c_str()) >> g_net;
 		g_is_inited = true;
 		return 0;
 	}
@@ -91,7 +123,7 @@ namespace FaceLivingDetector {
 		double dist_bot = calcDistance(shape, 33, 66);
 		double scale = dist_top / dist_bot;
 
-		if (scale >= 0.9 && scale <= 1.1) return MouseState::mouse_colse;
+		if (scale >= 0.9 && scale <= 1.1) return MouseState::mouse_close;
 		return MouseState::mouse_open;
 	}
 
@@ -117,10 +149,10 @@ namespace FaceLivingDetector {
 		double ar_right = calcARValue(eye_pts_right);
 
 		if (ar_left + ar_right > eyes_ar_thresh) return EyesState::eyes_open;
-		return EyesState::eyes_colse;
+		return EyesState::eyes_close;
 	}
 
-	int execute(cv::Mat& frame, Action action, double timeout, bool begin)
+	int aliveDetect(cv::Mat& frame, Action action, double timeout, bool begin)
 	{
 		if (!g_is_inited) return -1;
 
@@ -128,31 +160,30 @@ namespace FaceLivingDetector {
 		else {
 			g_time_cur = clock();
 			if (g_time_cur - g_time_start > timeout) {
-				return check_successful ? 1 : -1;
+				return g_check_successful ? 1 : -1;
 			}
 		}
 
 		dlib::cv_image<dlib::bgr_pixel> img(frame);
-		std::vector<dlib::rectangle> faces = detector(img);
-		std::stringstream ss;
+		std::vector<dlib::rectangle> faces = g_detector(img);
 
 		if (!faces.empty()) {
 			// 获取脸部68个特征点
 			// 特征点分布图: https://ibug.doc.ic.ac.uk/media/uploads/images/annotpics/figure_68_markup.jpg
-			dlib::full_object_detection shape = predictor(img, faces[0]);
+			dlib::full_object_detection shape = g_predictor(img, faces[0]);
 			int ret = 0;
 			switch (action) {
 
 				case FaceLivingDetector::shake:
 					if (begin) {
 						g_ok_cnt = 0;
-						check_successful = false;
+						g_check_successful = false;
 						g_except_state = HeadState::turn_left | HeadState::turn_right;
 					} 
 					ret = headCheck(shape);
 					if (ret & g_except_state) {
 						g_ok_cnt++;
-						if (g_ok_cnt > 3) check_successful = true;
+						if (g_ok_cnt > 3) g_check_successful = true;
 						if (ret == HeadState::turn_left) g_except_state = HeadState::turn_right;
 						else if (ret == HeadState::turn_right) g_except_state = HeadState::turn_left;
 					}
@@ -161,35 +192,79 @@ namespace FaceLivingDetector {
 				case FaceLivingDetector::open_mouth:
 					if (begin) {
 						g_ok_cnt = 0;
-						check_successful = false;
-						g_except_state = MouseState::mouse_colse;
+						g_check_successful = false;
+						g_except_state = MouseState::mouse_close;
 					}
 					ret = mouthCheck(shape);
 					if (ret & g_except_state) {
 						g_ok_cnt++;
-						if (g_ok_cnt > 1) check_successful = true;
-						if (ret == MouseState::mouse_colse) g_except_state = MouseState::mouse_open;
-						else if (ret == MouseState::mouse_open) g_except_state = MouseState::mouse_colse;
+						if (g_ok_cnt > 1) g_check_successful = true;
+						if (ret == MouseState::mouse_close) g_except_state = MouseState::mouse_open;
+						else if (ret == MouseState::mouse_open) g_except_state = MouseState::mouse_close;
 					}
 					break;
 
 				case FaceLivingDetector::blink:
 					if (begin) {
 						g_ok_cnt = 0;
-						check_successful = false;
+						g_check_successful = false;
 						g_except_state = EyesState::eyes_open;
 					}
 					ret = eyesCheck(shape);
 					if (ret & g_except_state) {
 						g_ok_cnt++;
-						if (g_ok_cnt > 3) check_successful = true;
-						if (ret == EyesState::eyes_open) g_except_state = EyesState::eyes_colse;
-						else if (ret == EyesState::eyes_colse) g_except_state = EyesState::eyes_open;
+						if (g_ok_cnt > 3) g_check_successful = true;
+						if (ret == EyesState::eyes_open) g_except_state = EyesState::eyes_close;
+						else if (ret == EyesState::eyes_close) g_except_state = EyesState::eyes_open;
 					}
 					break;
 			}
 		}
-		if (!check_successful) return 0; 
+		if (!g_check_successful) return 0; 
 		return 1;
 	}
+
+	cv::Rect findFaceRect(const cv::Mat & frame)
+	{
+		dlib::cv_image<dlib::bgr_pixel> img(frame);
+		std::vector<dlib::rectangle> faces_rect = g_detector(img);
+		if (faces_rect.empty()) return cv::Rect();
+
+		dlib::point tl = faces_rect[0].tl_corner();
+		dlib::point br = faces_rect[0].br_corner();		
+		return cv::Rect(cv::Point(tl.x(), tl.y()), cv::Point(br.x(), br.y())); 
+	}
+
+	int getFaceDescriptiot(const cv::Mat& face, dlib::matrix<float, 0, 1>& descriptor)
+	{
+		dlib::cv_image<dlib::bgr_pixel> img(face);
+		std::vector<dlib::rectangle> faces_rect = g_detector(img);
+		if (faces_rect.empty()) return -1;
+
+		dlib::full_object_detection shape = g_predictor(img, faces_rect[0]);
+		
+		std::vector<matrix<rgb_pixel>> faces;
+		matrix<rgb_pixel> face_chip;
+		extract_image_chip(img, get_face_chip_details(shape, 150, 0.25), face_chip);
+		faces.push_back(std::move(face_chip));
+
+		descriptor = g_net(faces)[0];
+		return 0;
+	}
+
+	double faceCompare(const cv::Mat& face1, const cv::Mat & face2)
+	{
+		int ret = 0;
+
+		dlib::matrix<float, 0, 1> face1_descriptor;
+		ret = getFaceDescriptiot(face1, face1_descriptor);
+		if (ret < 0) return 0;
+
+		dlib::matrix<float, 0, 1> face2_descriptor;
+		ret = getFaceDescriptiot(face2, face2_descriptor);
+		if (ret < 0) return 0;
+
+		return 1 - dlib::length(face1_descriptor - face2_descriptor);
+	}
+
 };
