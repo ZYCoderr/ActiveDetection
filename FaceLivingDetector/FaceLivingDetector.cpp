@@ -1,12 +1,10 @@
 #include "stdafx.h"
 #include "FaceLivingDetector.h"
 #include <dlib/image_processing/frontal_face_detector.h>
-#include <dlib/image_io.h>
 #include <dlib/opencv.h>
 #include <dlib/dnn.h>
-#include <dlib/clustering.h>
 #include <time.h>
-
+#include <type_traits>
 namespace FaceLivingDetector {
 	
 	using namespace dlib;
@@ -73,7 +71,7 @@ namespace FaceLivingDetector {
 	{
 		if (g_is_inited) return 0;
 		if (detector_model_path.empty() || resnet_model_path.empty()) return -1;
-		
+
 		g_detector = dlib::get_frontal_face_detector();
 		dlib::deserialize(detector_model_path.c_str()) >> g_predictor;
 		dlib::deserialize(resnet_model_path.c_str()) >> g_net;
